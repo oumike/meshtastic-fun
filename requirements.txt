@@ -1,0 +1,6 @@
+meshtastic
+paho-mqtt
+cryptography
+discord.py
+python-dotenv
+pubsub
