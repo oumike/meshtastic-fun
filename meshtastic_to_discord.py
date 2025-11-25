@@ -17,15 +17,9 @@ except ModuleNotFoundError:
 try:
     import meshtastic
     import meshtastic.serial_interface
-    from meshtastic.protobuf import mesh_pb2, portnums_pb2, mqtt_pb2
+    from meshtastic.protobuf import mesh_pb2, portnums_pb2
 except ModuleNotFoundError:
     print("meshtastic is required. Install with: pip install meshtastic", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    import paho.mqtt.client as mqtt
-except ModuleNotFoundError:
-    print("paho-mqtt is required. Install with: pip install paho-mqtt", file=sys.stderr)
     sys.exit(1)
 
 try:
@@ -52,23 +46,27 @@ DISCORD_SERVER_ID = int(os.getenv("DISCORD_SERVER_ID"))
 DISCORD_CHANNEL_MAP = {
     0: int(os.getenv("DISCORD_CHANNEL_LONGFAST")),  # PRIMARY (LongFast)
     1: int(os.getenv("DISCORD_CHANNEL_MICHIGAN")),  # Michigan
+    2: int(os.getenv("DISCORD_CHANNEL_SUMAT")),  # Sumat
+    3: int(os.getenv("DISCORD_CHANNEL_FARMINGTON")),  # Farmington
+    4: int(os.getenv("DISCORD_CHANNEL_WMI")),  # WMI
+    5: int(os.getenv("DISCORD_CHANNEL_EMI")),  # EMI
+    6: int(os.getenv("DISCORD_CHANNEL_MUSKEGON")),  # Muskegon
+    7: int(os.getenv("DISCORD_CHANNEL_UMICHMESH")),  # umichmesh
 }
 
 # Device configuration
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyUSB0")
 
-# MQTT configuration
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "msh/US/MI/2/e/#")
-MQTT_ENCRYPTION_KEY = os.getenv("MQTT_ENCRYPTION_KEY")
-
 # Channel configuration with PSKs
 CHANNELS = {
-    0: {"name": "LongFast", "psk": os.getenv("PSK_LONGFAST", "AQ==")},
-    1: {"name": "Michigan", "psk": os.getenv("PSK_MICHIGAN", "MA==")},
+    0: {"name": "PRIMARY", "psk": "AQ=="},
+    1: {"name": "Michigan", "psk": "MA=="},
+    2: {"name": "Sumat", "psk": "Sg=="},
+    3: {"name": "Farmington", "psk": "MA=="},
+    4: {"name": "WMI", "psk": "MA=="},
+    5: {"name": "EMI", "psk": "MA=="},
+    6: {"name": "Muskegon", "psk": "MA=="},
+    7: {"name": "umichmesh", "psk": "TFwwsCxHbkqPH5gZJ5pvM/V7QFgLwrI6Ry5YubCQQAE="},
 }
 
 # Node ID to name mapping (will be populated as we see nodes)
@@ -78,7 +76,6 @@ node_names = {}
 discord_client = None
 discord_channels = {}  # Maps channel index to Discord channel object
 message_queue = asyncio.Queue()
-mqtt_client = None
 
 
 def decrypt_message(packet, psk):
@@ -141,82 +138,14 @@ def get_node_name(node_id, interface=None):
     return f"!{node_id:08x}"
 
 
-def on_mqtt_message(client, userdata, msg):
-    """Handle MQTT messages."""
-    try:
-        # Skip JSON stat messages (they're on different topics)
-        if msg.topic.endswith('/stat'):
-            return
-        
-        # Parse the service envelope
-        se = mqtt_pb2.ServiceEnvelope()
-        try:
-            se.ParseFromString(msg.payload)
-        except Exception as parse_error:
-            # Some MQTT messages might not be ServiceEnvelope format, just skip them
-            return
-        
-        mp = se.packet
-        
-        # Use the channel index from the packet
-        channel_index = mp.channel
-        
-        # Only process channels we're monitoring
-        if channel_index not in DISCORD_CHANNEL_MAP:
-            return
-        
-        # Get sender info
-        from_id = getattr(mp, "from", None)
-        if not from_id:
-            return
-        
-        from_name = get_node_name(from_id)
-        channel_info = CHANNELS.get(channel_index, {"name": f"Unknown-{channel_index}", "psk": None})
-        
-        # Try to decrypt if encrypted
-        if hasattr(mp, "encrypted") and mp.encrypted:
-            # Try with the global MQTT key first
-            data = decrypt_message(mp, MQTT_ENCRYPTION_KEY)
-            
-            # If that fails, try with the channel PSK
-            if not data and channel_info.get("psk"):
-                data = decrypt_message(mp, channel_info["psk"])
-            
-            if data and hasattr(data, "payload") and data.portnum == portnums_pb2.TEXT_MESSAGE_APP:
-                message_text = data.payload.decode('utf-8', errors='ignore')
-                print(f"[MQTT:{channel_info['name']}] {from_name}: {message_text}")
-                # Queue message for Discord
-                if discord_client and discord_client.loop:
-                    asyncio.run_coroutine_threadsafe(
-                        message_queue.put((channel_index, from_name, message_text)),
-                        discord_client.loop
-                    )
-        
-    except Exception as e:
-        # Silently ignore errors - many MQTT messages may not be relevant
-        pass
-
-
-def on_mqtt_connect(client, userdata, flags, reason_code, properties):
-    """Handle MQTT connection."""
-    if reason_code == 0:
-        print(f"Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
-        client.subscribe(MQTT_TOPIC)
-        print(f"Subscribed to {MQTT_TOPIC}")
-    else:
-        print(f"Failed to connect to MQTT broker: {reason_code}", file=sys.stderr)
-
-
 def on_receive(packet, interface):
     """Callback when a packet is received."""
     
     try:
         # Packet comes as a dict from pub/sub
         if isinstance(packet, dict):
-            # Get channel - filter to only channels we're monitoring
+            # Get channel index
             channel_index = packet.get("channel", 0)
-            if channel_index not in DISCORD_CHANNEL_MAP:
-                return
             
             # Get sender information
             from_id = packet.get("from")
@@ -249,11 +178,12 @@ def on_receive(packet, interface):
                         if decrypted.portnum == portnums_pb2.TEXT_MESSAGE_APP:
                             message_text = decrypted.payload.decode('utf-8', errors='ignore')
                             print(f"[{channel_name}] {from_name} -> {to_id:08x}: {message_text}")
-                            # Queue message for Discord
-                            asyncio.run_coroutine_threadsafe(
-                                message_queue.put((channel_index, from_name, message_text)),
-                                discord_client.loop
-                            )
+                            # Queue message for Discord if channel is mapped
+                            if channel_index in DISCORD_CHANNEL_MAP:
+                                asyncio.run_coroutine_threadsafe(
+                                    message_queue.put((channel_index, from_name, message_text)),
+                                    discord_client.loop
+                                )
                             return
             
             # Handle already decoded messages
@@ -277,11 +207,12 @@ def on_receive(packet, interface):
                     
                     if message_text:
                         print(f"[{channel_name}] {from_name} -> {to_id:08x}: {message_text}")
-                        # Queue message for Discord
-                        asyncio.run_coroutine_threadsafe(
-                            message_queue.put((channel_index, from_name, message_text)),
-                            discord_client.loop
-                        )
+                        # Queue message for Discord if channel is mapped
+                        if channel_index in DISCORD_CHANNEL_MAP:
+                            asyncio.run_coroutine_threadsafe(
+                                message_queue.put((channel_index, from_name, message_text)),
+                                discord_client.loop
+                            )
             else:
                 pass  # Silently ignore non-text messages
     
@@ -324,9 +255,6 @@ class MeshtasticDiscordBot(discord.Client):
         # Start Meshtastic in a thread
         import threading
         threading.Thread(target=self.start_meshtastic, daemon=True).start()
-        
-        # Start MQTT client
-        threading.Thread(target=self.start_mqtt, daemon=True).start()
     
     async def process_message_queue(self):
         """Process messages from the queue and send to Discord."""
@@ -378,24 +306,6 @@ class MeshtasticDiscordBot(discord.Client):
         
         except Exception as e:
             print(f"Meshtastic error: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-    
-    def start_mqtt(self):
-        """Start MQTT client."""
-        global mqtt_client
-        try:
-            print(f"Connecting to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}...")
-            mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-            mqtt_client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-            mqtt_client.on_connect = on_mqtt_connect
-            mqtt_client.on_message = on_mqtt_message
-            
-            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-            mqtt_client.loop_forever()
-        
-        except Exception as e:
-            print(f"MQTT error: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc()
     
