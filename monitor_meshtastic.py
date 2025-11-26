@@ -245,7 +245,7 @@ class MeshtasticDiscordBot(discord.Client):
                 discord_channels[mesh_channel_idx] = channel
                 channel_name = CHANNELS.get(mesh_channel_idx, {}).get("name", f"Channel {mesh_channel_idx}")
                 print(f'Found Discord channel for {channel_name}: #{channel.name}')
-                await channel.send(f"🟢 Meshtastic bridge connected")
+                # await channel.send(f"🟢 Meshtastic bridge connected")
             else:
                 print(f'ERROR: Could not find Discord channel with ID {discord_channel_id}')
         
