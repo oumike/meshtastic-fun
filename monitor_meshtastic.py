@@ -6,6 +6,8 @@ import base64
 import asyncio
 import hashlib
 import os
+import sqlite3
+from datetime import datetime
 from pubsub import pub
 
 try:
@@ -76,6 +78,70 @@ node_names = {}
 discord_client = None
 discord_channels = {}  # Maps channel index to Discord channel object
 message_queue = asyncio.Queue()
+
+# Database configuration
+DB_PATH = os.getenv("DB_PATH", "meshtastic_messages.db")
+
+
+def init_database():
+    """Initialize the SQLite database and create tables if needed."""
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            channel_index INTEGER NOT NULL,
+            channel_name TEXT NOT NULL,
+            from_id INTEGER NOT NULL,
+            from_name TEXT NOT NULL,
+            to_id INTEGER NOT NULL,
+            message_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create index for faster queries
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_channel_timestamp 
+        ON messages(channel_index, timestamp)
+    ''')
+    
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_from_id 
+        ON messages(from_id)
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print(f"Database initialized: {DB_PATH}")
+
+
+def save_message_to_db(channel_index, channel_name, from_id, from_name, to_id, message_text):
+    """Save a message to the SQLite database."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10.0)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO messages (timestamp, channel_index, channel_name, from_id, from_name, to_id, message_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            datetime.utcnow().isoformat(),
+            channel_index,
+            channel_name,
+            from_id,
+            from_name,
+            to_id,
+            message_text
+        ))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving to database: {e}", file=sys.stderr)
 
 
 def decrypt_message(packet, psk):
@@ -178,6 +244,10 @@ def on_receive(packet, interface):
                         if decrypted.portnum == portnums_pb2.TEXT_MESSAGE_APP:
                             message_text = decrypted.payload.decode('utf-8', errors='ignore')
                             print(f"[{channel_name}] {from_name} -> {to_id:08x}: {message_text}")
+                            
+                            # Save to database
+                            save_message_to_db(channel_index, channel_name, from_id, from_name, to_id, message_text)
+                            
                             # Queue message for Discord if channel is mapped
                             if channel_index in DISCORD_CHANNEL_MAP:
                                 asyncio.run_coroutine_threadsafe(
@@ -207,6 +277,10 @@ def on_receive(packet, interface):
                     
                     if message_text:
                         print(f"[{channel_name}] {from_name} -> {to_id:08x}: {message_text}")
+                        
+                        # Save to database
+                        save_message_to_db(channel_index, channel_name, from_id, from_name, to_id, message_text)
+                        
                         # Queue message for Discord if channel is mapped
                         if channel_index in DISCORD_CHANNEL_MAP:
                             asyncio.run_coroutine_threadsafe(
@@ -338,6 +412,10 @@ def main():
     global discord_client
     
     print("Starting Meshtastic to Discord bridge...")
+    
+    # Initialize database
+    init_database()
+    
     print(f"Discord server: {DISCORD_SERVER_ID}")
     print(f"Monitored channels:")
     for mesh_idx, discord_id in DISCORD_CHANNEL_MAP.items():

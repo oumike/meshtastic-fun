@@ -4,3 +4,6 @@ cryptography
 discord.py
 python-dotenv
 pubsub
+fastapi
+uvicorn[standard]
+websockets
