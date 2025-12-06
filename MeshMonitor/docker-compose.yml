@@ -23,7 +23,7 @@ services:
       - MESHTASTIC_NODE_IP=serial-bridge
       - DEFAULT_WEATHER_LOCATION=Farmington, MI
       - ALLOWED_ORIGINS=http://192.168.50.18:9090,http://lucinda:9090
-      - PIRATE_WEATHER_API_KEY=VprNMqrvttDJeSYl2MLHyypmffC6lE6w
+      - PIRATE_WEATHER_API_KEY=${PIRATE_WEATHER_API_KEY}
     restart: unless-stopped
     depends_on:
       - serial-bridge
